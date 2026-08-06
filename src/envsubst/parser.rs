@@ -9,10 +9,16 @@ use std::{
 const READ_BUFFER_SIZE: usize = 1024 * 256;
 #[cfg(not(test))]
 const MAX_ENV_LEN: usize = 1024 * 4;
+#[cfg(not(test))]
+const MAX_ERROR_BUFFER_LEN: usize = 50;
 const ENV_SIGN: u8 = b'$';
 const START_SIGN: u8 = b'{';
 const END_SIGN: u8 = b'}';
 const DEFAULT_VALUE_SEP: &str = ":";
+// Guard: forces a compile error here if windows support is ever added,
+// as a reminder to pick the right line ending (tests won't catch \r vs \n).
+#[cfg(not(windows))]
+const NEWLINE_CHAR: &str = "\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanStep {
@@ -35,6 +41,7 @@ where
     let mut read_buffer: [u8; READ_BUFFER_SIZE] = [0; READ_BUFFER_SIZE];
     let mut scan_step = ScanStep::Normal;
     let mut env_name_buffer = Vec::with_capacity(MAX_ENV_LEN);
+    let mut errors_buffer: Vec<String> = Vec::with_capacity(MAX_ERROR_BUFFER_LEN);
     let mut out_buffer: Vec<u8> = Vec::with_capacity(READ_BUFFER_SIZE);
     let mut read_size: usize = 1;
 
@@ -68,8 +75,12 @@ where
                         scan_step = ScanStep::Normal;
                     } else if byte == END_SIGN {
                         let env_name = str::from_utf8(&env_name_buffer)?;
-                        let restored_string =
-                            process_env(env_name, env_error_mode, &mut resolve_env_func)?;
+                        let restored_string = process_env(
+                            env_name,
+                            env_error_mode,
+                            &mut errors_buffer,
+                            &mut resolve_env_func,
+                        )?;
                         out_buffer.extend(restored_string.as_bytes());
                         env_name_buffer.clear();
                         scan_step = ScanStep::Normal;
@@ -79,8 +90,13 @@ where
                 }
             }
         }
-        writer.write_all(&out_buffer)?;
+        if errors_buffer.is_empty() {
+            writer.write_all(&out_buffer)?;
+        }
         out_buffer.clear();
+    }
+    if !errors_buffer.is_empty() {
+        bail!("{NEWLINE_CHAR}{}", errors_buffer.join(NEWLINE_CHAR))
     }
     flush_pending_state(scan_step, &env_name_buffer, &mut out_buffer);
     writer.write_all(&out_buffer)?;
@@ -90,6 +106,7 @@ where
 fn process_env<F: FnMut(&str) -> Result<String>>(
     env_str: &str,
     env_error_mode: &EnvErrorMode,
+    errors_buffer: &mut Vec<String>,
     resolve_env_func: &mut F,
 ) -> Result<String> {
     let (env_name, default_value) = env_str
@@ -109,7 +126,13 @@ fn process_env<F: FnMut(&str) -> Result<String>>(
                     "{}{}{}{}",
                     ENV_SIGN as char, START_SIGN as char, env_str, END_SIGN as char
                 )),
-                EnvErrorMode::Error => bail!("{err} `{env_name}`"),
+                EnvErrorMode::Error => {
+                    if errors_buffer.len() >= MAX_ERROR_BUFFER_LEN {
+                        bail!("{NEWLINE_CHAR}{}", errors_buffer.join(NEWLINE_CHAR))
+                    }
+                    errors_buffer.push(format!("{err} `{env_name}`"));
+                    Ok(String::new())
+                }
             }
         }
     }
@@ -135,6 +158,8 @@ fn flush_pending_state(scan_step: ScanStep, env_name_buffer: &[u8], out_buffer: 
 const READ_BUFFER_SIZE: usize = 1;
 #[cfg(test)]
 const MAX_ENV_LEN: usize = 128;
+#[cfg(test)]
+const MAX_ERROR_BUFFER_LEN: usize = 2;
 
 #[cfg(test)]
 mod tests {
@@ -177,6 +202,24 @@ mod tests {
             mock_get_env,
         );
         assert!(result.is_err_and(|err| { err.to_string().contains("`UNDECLARED_VAR`") }));
+    }
+
+    #[test]
+    fn check_max_error_len_in_error_mode() {
+        let mock_reader =
+            b"This must be an error: ${UNDECLARED_VAR} and ${OTHER_VAR} and ${ANOTHER_VAR}";
+        let mut mock_writer = Cursor::new(Vec::new());
+        let result = substitute(
+            &mock_reader[..],
+            &mut mock_writer,
+            &EnvErrorMode::Error,
+            mock_get_env,
+        );
+        assert!(result.is_err_and(|err| {
+            err.to_string().contains("`UNDECLARED_VAR`")
+                & err.to_string().contains("`OTHER_VAR`")
+                & !err.to_string().contains("`ANOTHER_VAR`")
+        }));
     }
 
     #[test]
