@@ -1,33 +1,31 @@
 name: Release
-
 on:
   push:
     tags:
       - "v*.*.*"
-
 permissions:
   contents: write
-
 env:
   CARGO_TERM_COLOR: always
-
 jobs:
   release:
     name: Build and publish release
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.91.0
-
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
       - name: Check tag matches Cargo.toml version
         shell: bash
         run: |
           set -euo pipefail
-
           if [[ ! -f Cargo.toml ]]; then
             echo "::error::Cargo.toml not found in repository root"
             echo "Current directory:"
@@ -38,89 +36,76 @@ jobs:
             find . -maxdepth 4 -name Cargo.toml -print
             exit 1
           fi
-
           tag_version="${GITHUB_REF_NAME#v}"
-
           cargo_version="$(
             cargo metadata --no-deps --format-version 1 \
               | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])'
           )"
-
           if [[ "${tag_version}" != "${cargo_version}" ]]; then
             echo "::error::Tag version ${tag_version} does not match Cargo.toml version ${cargo_version}"
             exit 1
           fi
-
           echo "Tag version matches Cargo.toml version: ${cargo_version}"
-
-      - name: Build release binary
+      - name: Build release binary (glibc)
         run: cargo build --release --locked
-
+      - name: Build release binary (musl / Alpine)
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
       - name: Prepare release assets
         shell: bash
         run: |
           set -euo pipefail
-
           version="${GITHUB_REF_NAME#v}"
           asset_name="execenv-v${version}.linux.amd64"
-
+          musl_asset_name="execenv-v${version}.alpine.amd64"
           mkdir -p dist
-
           cp target/release/execenv "dist/${asset_name}"
-          chmod +x "dist/${asset_name}"
-
+          cp target/x86_64-unknown-linux-musl/release/execenv "dist/${musl_asset_name}"
+          chmod +x "dist/${asset_name}" "dist/${musl_asset_name}"
           (
             cd dist
-            sha256sum "${asset_name}" > "execenv-v${version}.checksums.txt"
+            sha256sum "${asset_name}" "${musl_asset_name}" > "execenv-v${version}.checksums.txt"
           )
-
       - name: Generate release notes
         shell: bash
         env:
           RELEASE_NOTES_TEMPLATE: ${{ vars.RELEASE_NOTES_TEMPLATE }}
         run: |
           set -euo pipefail
-
           version="${GITHUB_REF_NAME#v}"
           tag="${GITHUB_REF_NAME}"
           repo="${GITHUB_REPOSITORY}"
-
           export ASSET_NAME="execenv-v${version}.linux.amd64"
           export CHECKSUM_NAME="execenv-v${version}.checksums.txt"
+          export MUSL_ASSET_NAME="execenv-v${version}.alpine.amd64"
           export ASSET_URL="https://github.com/${repo}/releases/download/${tag}/${ASSET_NAME}"
           export CHECKSUM_URL="https://github.com/${repo}/releases/download/${tag}/${CHECKSUM_NAME}"
-
+          export MUSL_ASSET_URL="https://github.com/${repo}/releases/download/${tag}/${MUSL_ASSET_NAME}"
           if [[ -z "${RELEASE_NOTES_TEMPLATE:-}" ]]; then
             echo "::error::Repository variable RELEASE_NOTES_TEMPLATE is empty or not set"
             exit 1
           fi
-
           python3 - <<'PY'
           import os
           from pathlib import Path
-
           notes = os.environ["RELEASE_NOTES_TEMPLATE"]
-
           replacements = {
               "__ASSET_NAME__": os.environ["ASSET_NAME"],
               "__CHECKSUM_NAME__": os.environ["CHECKSUM_NAME"],
+              "__MUSL_ASSET_NAME__": os.environ["MUSL_ASSET_NAME"],
               "__ASSET_URL__": os.environ["ASSET_URL"],
               "__CHECKSUM_URL__": os.environ["CHECKSUM_URL"],
+              "__MUSL_ASSET_URL__": os.environ["MUSL_ASSET_URL"],
           }
-
           for key, value in replacements.items():
               notes = notes.replace(key, value)
-
           Path("release-notes.md").write_text(notes, encoding="utf-8")
           PY
-
       - name: Create GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-
           gh release create "${GITHUB_REF_NAME}" \
             dist/* \
             --title "${GITHUB_REF_NAME}" \
