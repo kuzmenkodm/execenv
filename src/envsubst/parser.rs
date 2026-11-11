@@ -27,16 +27,18 @@ enum ScanStep {
     CollectEnvName,
 }
 
-pub fn substitute<R, W, F>(
+pub fn substitute<R, W, F, K>(
     mut reader: R,
     mut writer: W,
     env_error_mode: &EnvErrorMode,
     mut resolve_env_func: F,
+    mut filter_env_function: K,
 ) -> Result<()>
 where
     R: Read,
     W: Write,
     F: FnMut(&str) -> Result<String>,
+    K: FnMut(&str) -> Result<()>,
 {
     let mut read_buffer: [u8; READ_BUFFER_SIZE] = [0; READ_BUFFER_SIZE];
     let mut scan_step = ScanStep::Normal;
@@ -74,13 +76,14 @@ where
                         env_name_buffer.clear();
                         scan_step = ScanStep::Normal;
                     } else if byte == END_SIGN {
-                        let env_name = str::from_utf8(&env_name_buffer)?;
+                        let placeholder = str::from_utf8(&env_name_buffer)?;
                         let restored_string = process_env(
-                            env_name,
+                            placeholder,
                             env_error_mode,
                             &mut errors_buffer,
                             &mut resolve_env_func,
                         )?;
+                        filter_env_function(&parse_placeholder(placeholder).0)?;
                         out_buffer.extend(restored_string.as_bytes());
                         env_name_buffer.clear();
                         scan_step = ScanStep::Normal;
@@ -103,17 +106,23 @@ where
     Ok(())
 }
 
+fn parse_placeholder(placeholder: &str) -> (String, Option<String>) {
+    let (env_name, default_value) = placeholder
+        .split_once(DEFAULT_VALUE_SEP)
+        .map_or((placeholder.to_owned(), None), |(name, default)| {
+            (name.to_owned(), Some(default.to_owned()))
+        });
+    (env_name, default_value)
+}
+
 fn process_env<F: FnMut(&str) -> Result<String>>(
-    env_str: &str,
+    placeholder: &str,
     env_error_mode: &EnvErrorMode,
     errors_buffer: &mut Vec<String>,
     resolve_env_func: &mut F,
 ) -> Result<String> {
-    let (env_name, default_value) = env_str
-        .split_once(DEFAULT_VALUE_SEP)
-        .map_or((env_str, None), |tuple| (tuple.0, Some(tuple.1)));
-
-    let result = resolve_env_func(env_name);
+    let (env_name, default_value) = parse_placeholder(placeholder);
+    let result = resolve_env_func(&env_name);
     match result {
         Ok(val) => Ok(val),
         Err(err) => {
@@ -124,7 +133,7 @@ fn process_env<F: FnMut(&str) -> Result<String>>(
                 EnvErrorMode::Empty => Ok(String::new()),
                 EnvErrorMode::Keep => Ok(format!(
                     "{}{}{}{}",
-                    ENV_SIGN as char, START_SIGN as char, env_str, END_SIGN as char
+                    ENV_SIGN as char, START_SIGN as char, placeholder, END_SIGN as char
                 )),
                 EnvErrorMode::Error => {
                     if errors_buffer.len() >= MAX_ERROR_BUFFER_LEN {
@@ -176,6 +185,10 @@ mod tests {
         }
     }
 
+    fn mock_filter_env(_placeholder: &str) -> Result<()> {
+        Ok(())
+    }
+
     #[test]
     fn missing_var_empty_mode() {
         let mock_reader = b"This var must be empty: ${EMPTY_VAR}";
@@ -185,6 +198,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Empty,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -200,6 +214,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Error,
             mock_get_env,
+            mock_filter_env,
         );
         assert!(result.is_err_and(|err| { err.to_string().contains("`UNDECLARED_VAR`") }));
     }
@@ -214,6 +229,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Error,
             mock_get_env,
+            mock_filter_env,
         );
         assert!(result.is_err_and(|err| {
             err.to_string().contains("`UNDECLARED_VAR`")
@@ -231,6 +247,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -246,6 +263,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -261,6 +279,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -277,6 +296,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Error,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -292,6 +312,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -307,6 +328,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -322,6 +344,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Error,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -337,6 +360,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -351,7 +375,7 @@ mod tests {
             if key.eq("PORT") {
                 Ok(String::new())
             } else {
-                bail!("Not found")
+                bail!("")
             }
         };
         substitute(
@@ -359,6 +383,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -374,6 +399,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Error,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -389,6 +415,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Error,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
@@ -404,6 +431,7 @@ mod tests {
             &mut mock_writer,
             &EnvErrorMode::Keep,
             mock_get_env,
+            mock_filter_env,
         )
         .unwrap();
         let written_data = mock_writer.into_inner();
