@@ -56,7 +56,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           asset_name="execenv-v${version}.linux.amd64"
-          musl_asset_name="execenv-v${version}.alpine.amd64"
+          musl_asset_name="execenv-v${version}.musl.amd64"
           mkdir -p dist
           cp target/release/execenv "dist/${asset_name}"
           cp target/x86_64-unknown-linux-musl/release/execenv "dist/${musl_asset_name}"
@@ -66,7 +66,7 @@ jobs:
             sha256sum "${asset_name}" "${musl_asset_name}" > "execenv-v${version}.checksums.txt"
           )
       - name: Generate release notes
-        shell: bash
+        shell: bashf
         env:
           RELEASE_NOTES_TEMPLATE: ${{ vars.RELEASE_NOTES_TEMPLATE }}
         run: |
@@ -76,7 +76,7 @@ jobs:
           repo="${GITHUB_REPOSITORY}"
           export ASSET_NAME="execenv-v${version}.linux.amd64"
           export CHECKSUM_NAME="execenv-v${version}.checksums.txt"
-          export MUSL_ASSET_NAME="execenv-v${version}.alpine.amd64"
+          export MUSL_ASSET_NAME="execenv-v${version}.musl.amd64"
           export ASSET_URL="https://github.com/${repo}/releases/download/${tag}/${ASSET_NAME}"
           export CHECKSUM_URL="https://github.com/${repo}/releases/download/${tag}/${CHECKSUM_NAME}"
           export MUSL_ASSET_URL="https://github.com/${repo}/releases/download/${tag}/${MUSL_ASSET_NAME}"
